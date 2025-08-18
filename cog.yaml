@@ -54,7 +54,7 @@ build:
   python_packages:
     - "selenium"
     - "requests"
-    - "pillow""
+    - "pillow"
 
   # commands run after the environment is setup
   run:
