@@ -1,4 +1,4 @@
-# predict.py
+# predict.py — orbit-only route shots
 from typing import List, Optional, Tuple, Dict
 from cog import BasePredictor, Input, Path
 
@@ -52,50 +52,57 @@ def build_earth_url_with_search(address: str, lat: float, lon: float,
     return (f"https://earth.google.com/web/search/{addr}/"
             f"@{lat:.7f},{lon:.7f},{a:.1f}a,{d:.1f}d,{y:.2f}y,{h:.3f}h,{t:.3f}t,{r:.1f}r")
 
-def make_drone_route(
+def make_orbit_route_only(
     lat: float, lon: float, address: str,
     use_elevation: bool, default_alt: float,
     max_distance: float, near_distance_min: float,
     start_heading_deg: float, clockwise: bool,
+    sweep_degrees: float,                      # NEW: choose full/partial orbit
     contact_email: str, count: int = 10
 ) -> List[Dict]:
+    """
+    Returns ONLY orbit shots (length = count), ordered as a smooth route.
+    Each step has: {step, label, d, y, h, t, r, url}
+    """
     elev = get_elevation_open_elevation(lat, lon) if use_elevation else None
     a_target = elev if elev is not None else default_alt
 
-    N = max(3, count)
+    N = max(1, count)
     max_d = clamp(max_distance, 1.0, 195.0)
-    near_d = max(near_distance_min, max_d - 70.0)
+    near_d = max(near_distance_min, max_d - 70.0)  # push-in target
 
-    tilt_approach, tilt_orbit, tilt_hero = 55.0, 67.0, 72.0
-    fov_base, roll = 35.0, 0.0
+    tilt_orbit = 67.0
+    fov_base = 35.0
+    roll = 0.0
 
-    orbit_steps = N - 2
+    # Headings across an arc (default 360°). Do not repeat the start angle on the last frame.
     step_sign = 1.0 if clockwise else -1.0
-    heading_step = step_sign * (360.0 / orbit_steps)
+    step_deg = step_sign * (sweep_degrees / max(1, N))  # N frames, last < start+sweep
+    headings = [(start_heading_deg + step_deg * i) % 360.0 for i in range(N)]
 
-    def dist_for_orbit_idx(i: int, total: int) -> float:
-        x = i / max(1, total - 1)
-        eased = ease_in_out_quad(x)
-        return round(max_d - (max_d - near_d) * eased, 1)
+    # Distances: ease from far -> near across the N orbit shots
+    if N == 1:
+        dists = [round((max_d + near_d) / 2.0, 1)]
+    else:
+        dists = [round(max_d - (max_d - near_d) * ease_in_out_quad(i/(N-1)), 1) for i in range(N)]
 
     route: List[Dict] = []
-    route.append({"step": 1, "label": "Establishing (far, lower tilt)",
-                  "d": round(max_d, 1), "y": fov_base, "h": start_heading_deg % 360.0, "t": tilt_approach, "r": roll})
-    for i in range(orbit_steps):
-        h = (start_heading_deg + heading_step * (i + 1)) % 360.0
-        d = dist_for_orbit_idx(i, orbit_steps)
-        y = fov_base + (((i % 2) * 2 - 1) * 3.0) if i % 2 else fov_base
-        route.append({"step": 2 + i, "label": f"Orbit {i+1}/{orbit_steps}",
-                      "d": d, "y": y, "h": h, "t": tilt_orbit, "r": roll})
-    route.append({"step": N, "label": "Hero close-up",
-                  "d": round(near_d, 1), "y": fov_base,
-                  "h": (start_heading_deg + heading_step * orbit_steps) % 360.0,
-                  "t": tilt_hero, "r": roll})
-
-    for row in route:
+    for i in range(N):
+        y = fov_base + (((i % 2) * 2 - 1) * 3.0) if i % 2 else fov_base  # subtle FOV breathing
+        row = {
+            "step": i + 1,
+            "label": f"Route {i+1}/{N}",
+            "d": dists[i],
+            "y": y,
+            "h": headings[i],
+            "t": tilt_orbit,
+            "r": roll,
+        }
         row["url"] = build_earth_url_with_search(address, lat, lon,
                                                  a=a_target, d=row["d"], y=row["y"],
                                                  h=row["h"], t=row["t"], r=row["r"])
+        route.append(row)
+
     return route
 
 # ---------- Image utils ----------
@@ -111,23 +118,26 @@ def center_crop(image_path: str, output_path: str, crop_margin: float) -> None:
 class Predictor(BasePredictor):
     def setup(self) -> None:
         options = webdriver.ChromeOptions()
-        # use the same binary path you already confirmed working
-        options.binary_location = '/root/chrome-linux/chrome'
+        options.binary_location = '/root/chrome-linux/chrome'  # same path you used successfully
         options.add_argument('--headless')
         options.add_argument('--no-sandbox')
         options.add_argument('--disable-dev-shm-usage')
+        # These help WebGL in some containers (optional)
+        options.add_argument("--use-gl=egl")
+        options.add_argument("--enable-webgl")
+        options.add_argument("--ignore-gpu-blocklist")
+
         self.browser = webdriver.Chrome(options=options)
         self.wait = WebDriverWait(self.browser, 30)
 
     def _wait_scene_ready(self, index: int, debug: bool) -> None:
-        # 1) canvas present
         try:
             self.wait.until(EC.presence_of_element_located((By.TAG_NAME, "canvas")))
             if debug: print(f"[Step {index:02d}] Canvas detected.", flush=True)
         except TimeoutException:
             if debug: print(f"[Step {index:02d}] No canvas before timeout.", flush=True)
 
-        # 2) splash text (“Google Earth”) gone
+        # Wait for splash text to disappear
         try:
             self.wait.until(lambda d: d.execute_script(
                 "return document.body && document.body.innerText.indexOf('Google Earth') === -1;"
@@ -137,13 +147,11 @@ class Predictor(BasePredictor):
             if debug: print(f"[Step {index:02d}] Splash still visible; continuing.", flush=True)
 
     def _open_and_capture_new_tab(self, url: str, w: int, h: int, wait_seconds: int, index: int, debug: bool) -> str:
-        # open URL in a fresh tab to avoid SPA caching/state
-        self.browser.switch_to.new_window('tab')
+        self.browser.switch_to.new_window('tab')            # NEW TAB per shot
         self.browser.set_window_size(w, h)
         if debug: print(f"[Step {index:02d}] Opening NEW TAB: {url}", flush=True)
-        self.browser.get(url)
 
-        # try dismiss overlays
+        self.browser.get(url)
         try:
             time.sleep(0.5)
             self.browser.find_element(By.TAG_NAME, "body").send_keys(Keys.ESCAPE)
@@ -156,7 +164,7 @@ class Predictor(BasePredictor):
             if debug: print(f"[Step {index:02d}] Extra wait: {wait_seconds}s", flush=True)
             time.sleep(wait_seconds)
 
-        # small user-like nudge to ensure render (optional)
+        # Tiny nudge to force a render tick
         try:
             self.browser.find_element(By.TAG_NAME, "body").send_keys(Keys.ARROW_UP)
         except Exception:
@@ -164,10 +172,8 @@ class Predictor(BasePredictor):
 
         full_path = f"view_{index:02d}_full.png"
         ok = self.browser.save_screenshot(full_path)
-        if debug:
-            print(f"[Step {index:02d}] Screenshot saved: {full_path} (ok={ok})", flush=True)
+        if debug: print(f"[Step {index:02d}] Screenshot saved: {full_path} (ok={ok})", flush=True)
 
-        # close tab and return to the first handle
         self.browser.close()
         self.browser.switch_to.window(self.browser.window_handles[0])
         return full_path
@@ -179,11 +185,12 @@ class Predictor(BasePredictor):
         h: int = Input(description="Viewport height", default=1080),
         wait_seconds: int = Input(description="Extra wait after load", default=12),
         crop_margin: float = Input(description="Center-crop margin per side (0–0.49)", default=0.15),
-        count: int = Input(description="Number of views in route", default=10),
+        count: int = Input(description="Number of route shots (orbit frames)", default=10),
         max_distance: float = Input(description="Max camera distance (≤195)", default=195.0),
         near_distance_min: float = Input(description="Min near distance", default=90.0),
         start_heading_deg: float = Input(description="Start heading (0=N,90=E,180=S,270=W)", default=0.0),
         clockwise: bool = Input(description="Orbit clockwise?", default=True),
+        sweep_degrees: float = Input(description="Total orbit sweep in degrees (e.g., 360, 180, 90)", default=360.0),
         use_elevation: bool = Input(description="Use Open-Elevation for target altitude", default=True),
         default_alt: float = Input(description="Fallback target altitude (m ASL)", default=30.0),
         contact_email: str = Input(description="Contact email for Nominatim UA", default="you@example.com"),
@@ -194,21 +201,22 @@ class Predictor(BasePredictor):
         lat, lon = geocode_nominatim(address, contact_email)
         time.sleep(1.0)  # polite pause
 
-        # 2) Build ordered route
-        route = make_drone_route(
+        # 2) Build ordered ORBIT-ONLY route
+        route = make_orbit_route_only(
             lat=lat, lon=lon, address=address,
             use_elevation=use_elevation, default_alt=default_alt,
             max_distance=max_distance, near_distance_min=near_distance_min,
             start_heading_deg=start_heading_deg, clockwise=clockwise,
-            contact_email=contact_email, count=count
+            sweep_degrees=sweep_degrees, contact_email=contact_email,
+            count=count
         )
 
-        # 3) Log all URLs
+        # 3) Log URLs
         if debug_urls:
-            print("\n=== Generated route URLs (ordered) ===", flush=True)
+            print("\n=== Orbit-only route URLs (ordered) ===", flush=True)
             for step in route:
                 print(f"[{step['step']:02d}] {step['label']}: {step['url']}", flush=True)
-            print("=== End route URLs ===\n", flush=True)
+            print("=== End URLs ===\n", flush=True)
             try:
                 with open("urls.txt", "w", encoding="utf-8") as f:
                     for step in route:
@@ -216,7 +224,7 @@ class Predictor(BasePredictor):
             except Exception as e:
                 print(f"Failed to write urls.txt: {e}", flush=True)
 
-        # 4) Capture each view in a FRESH TAB
+        # 4) Capture each view (fresh tab per URL), crop, return
         outputs: List[Path] = []
         for i, step in enumerate(route, start=1):
             full_img = self._open_and_capture_new_tab(step["url"], w, h, wait_seconds, i, debug_urls)
