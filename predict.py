@@ -10,7 +10,6 @@ from PIL import Image
 
 from selenium import webdriver
 from selenium.webdriver.common.by import By
-from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException
@@ -51,14 +50,10 @@ class Predictor(BasePredictor):
         options.add_argument('--headless')
         options.add_argument('--no-sandbox')
         options.add_argument('--disable-dev-shm-usage')
-        # FIX 1: This is crucial to prevent the browser renderer from freezing.
         options.add_argument('--disable-gpu')
         self.browser = webdriver.Chrome(options=options)
         
     def _open_and_capture(self, url: str, w: int, h: int, wait_seconds: int, debug: bool) -> str:
-        # Note: A single browser instance can become unstable.
-        # This logic is now self-contained; a new tab isn't strictly needed
-        # but the window handle management remains for robustness.
         main_window = self.browser.current_window_handle
         
         self.browser.switch_to.new_window('tab')
@@ -66,21 +61,29 @@ class Predictor(BasePredictor):
         if debug: print(f"Opening URL: {url}", flush=True)
         self.browser.get(url)
 
-        # FIX 2: Smartly wait for the splash screen to disappear.
+        # --- DEFINITIVE MULTI-STEP WAIT ---
         try:
-            wait = WebDriverWait(self.browser, 30) # Wait up to 30 seconds
-            wait.until(lambda d: d.execute_script(
-                "return document.body && document.body.innerText.indexOf('Google Earth') === -1;"
-            ))
-            if debug: print("Splash screen is gone.", flush=True)
-        except TimeoutException:
-            if debug: print("Splash screen wait timed out; continuing anyway.", flush=True)
+            wait = WebDriverWait(self.browser, 60) # Generous 60-second timeout for the entire process
 
-        # Fixed wait for 3D data to load *after* the splash is gone.
+            # Step 1: Wait for the canvas element to exist.
+            if debug: print("Waiting for canvas to appear...", flush=True)
+            wait.until(EC.presence_of_element_located((By.TAG_NAME, "canvas")))
+            if debug: print("✅ Canvas appeared.", flush=True)
+
+            # Step 2: Wait for a key UI element (the search button) to be ready.
+            if debug: print("Waiting for UI to be ready (checking for search button)...", flush=True)
+            wait.until(EC.presence_of_element_located((By.CSS_SELECTOR, 'button[aria-label="Search"]')))
+            if debug: print("✅ UI is ready.", flush=True)
+
+        except TimeoutException:
+            if debug: print("⚠️ Main interface did not load within the timeout period.", flush=True)
+        # ------------------------------------
+
+        # Final fixed wait for high-resolution 3D tiles to stream in.
         if wait_seconds > 0:
-            if debug: print(f"Starting fixed wait for 3D data: {wait_seconds}s", flush=True)
+            if debug: print(f"Starting final wait for 3D textures: {wait_seconds}s", flush=True)
             time.sleep(wait_seconds)
-            if debug: print("Fixed wait finished.", flush=True)
+            if debug: print("Final wait finished.", flush=True)
 
         # Screenshot and close the tab
         full_path = "screenshot_full.png"
@@ -99,7 +102,7 @@ class Predictor(BasePredictor):
         address: str = Input(description="Optional address or label for the location", default=""),
         w: int = Input(description="Viewport width", default=1920),
         h: int = Input(description="Viewport height", default=1080),
-        wait_seconds: int = Input(description="Fixed time (seconds) to wait for 3D data after splash screen", default=15),
+        wait_seconds: int = Input(description="Extra time (seconds) to wait for high-res graphics to load", default=10),
         crop_margin: float = Input(description="Center-crop margin per side (0–0.49)", default=0.15),
         near_distance_min: float = Input(description="Camera distance for the shot", default=90.0),
         start_heading_deg: float = Input(description="Camera heading (0=N,90=E,180=S,270=W)", default=0.0),
