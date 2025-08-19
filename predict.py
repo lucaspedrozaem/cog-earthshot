@@ -1,24 +1,20 @@
-from typing import List, Optional, Tuple, Dict
+from typing import List, Optional, Tuple
 from cog import BasePredictor, Input, Path
 
 import os
 import time
 import requests
 from urllib.parse import quote_plus
-
 from PIL import Image
 
 from selenium import webdriver
-from selenium.webdriver.common.by import By
-from selenium.webdriver.common.keys import Keys
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import TimeoutException
 
 # ---------- Free services ----------
 OPEN_ELEVATION_URL = "https://api.open-elevation.com/api/v1/lookup"
+OPEN_METEO_GEOCODE_URL = "https://geocoding-api.open-meteo.com/v1/search"
+NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
 
-# ---------- Elevation ----------
+# ---------- Utils ----------
 def get_elevation_open_elevation(lat: float, lon: float) -> Optional[float]:
     r = requests.get(OPEN_ELEVATION_URL, params={"locations": f"{lat},{lon}"}, timeout=20)
     if not r.ok:
@@ -27,14 +23,12 @@ def get_elevation_open_elevation(lat: float, lon: float) -> Optional[float]:
     res = js.get("results") or []
     return float(res[0].get("elevation")) if res else None
 
-# ---------- URL Building ----------
 def build_earth_url_with_search(address: str, lat: float, lon: float,
                                 a: float, d: float, y: float, h: float, t: float, r: float = 0.0) -> str:
     addr = quote_plus(address) if address else ""
     return (f"https://earth.google.com/web/search/{addr}/"
             f"@{lat:.7f},{lon:.7f},{a:.1f}a,{d:.1f}d,{y:.2f}y,{h:.3f}h,{t:.3f}t,{r:.1f}r")
 
-# ---------- Image utils ----------
 def center_crop(image_path: str, output_path: str, crop_margin: float) -> None:
     crop_margin = max(0.0, min(0.49, float(crop_margin)))
     with Image.open(image_path) as im:
@@ -42,6 +36,69 @@ def center_crop(image_path: str, output_path: str, crop_margin: float) -> None:
         left, right = int(w * crop_margin), int(w * (1.0 - crop_margin))
         top, bottom = int(h * crop_margin), int(h * (1.0 - crop_margin))
         im.crop((left, top, right, bottom)).save(output_path)
+
+def try_parse_latlon(text: str) -> Optional[Tuple[float, float]]:
+    try:
+        parts = [p.strip() for p in text.split(",")]
+        if len(parts) == 2:
+            return float(parts[0]), float(parts[1])
+    except Exception:
+        pass
+    return None
+
+# ---------- Geocoding ----------
+def geocode_open_meteo(address: str) -> Optional[Tuple[float, float, str]]:
+    """Primary free geocoder (no key). Returns (lat, lon, label) or None."""
+    if not address:
+        return None
+    params = {"name": address, "count": 1, "language": "en", "format": "json"}
+    r = requests.get(OPEN_METEO_GEOCODE_URL, params=params, timeout=20)
+    if not r.ok:
+        return None
+    js = r.json() or {}
+    results = js.get("results") or []
+    if not results:
+        return None
+    hit = results[0]
+    lat = float(hit["latitude"])
+    lon = float(hit["longitude"])
+    label = ", ".join([p for p in [hit.get("name"), hit.get("admin1"), hit.get("country_code")] if p])
+    return lat, lon, label
+
+def geocode_nominatim(address: str) -> Optional[Tuple[float, float, str]]:
+    """Fallback free geocoder (keyless). Respect Nominatim's UA policy."""
+    if not address:
+        return None
+    ua = os.getenv("GEOCODER_UA", "videotour-geocoder/1.0 (+https://example.com)")
+    headers = {"User-Agent": ua}
+    params = {"q": address, "format": "json", "limit": 1}
+    r = requests.get(NOMINATIM_URL, params=params, headers=headers, timeout=20)
+    if not r.ok:
+        return None
+    arr = r.json() or []
+    if not arr:
+        return None
+    hit = arr[0]
+    lat = float(hit["lat"])
+    lon = float(hit["lon"])
+    label = hit.get("display_name", address)
+    return lat, lon, label
+
+def geocode_address(address: str) -> Tuple[float, float, str]:
+    """Resolve address → (lat, lon, label). Tries Open-Meteo, then Nominatim."""
+    # Accept "lat,lon" directly
+    parsed = try_parse_latlon(address)
+    if parsed:
+        lat, lon = parsed
+        return lat, lon, f"{lat:.6f}, {lon:.6f}"
+
+    res = geocode_open_meteo(address)
+    if res:
+        return res
+    res = geocode_nominatim(address)
+    if res:
+        return res
+    raise ValueError(f"Could not geocode address: {address}")
 
 # ---------- Predictor ----------
 class Predictor(BasePredictor):
@@ -53,7 +110,7 @@ class Predictor(BasePredictor):
         options.add_argument('--no-sandbox')
         self.browser = webdriver.Chrome(options=options)
 
-    # Helper: open page + screenshot (matches your earlier behavior)
+    # open page + screenshot helper
     def _open_and_capture_new_tab(
         self,
         url: str,
@@ -63,7 +120,6 @@ class Predictor(BasePredictor):
         index: int = 1,
         debug: bool = True
     ) -> str:
-        """Open the URL, optionally wait, and save a screenshot. Returns file path."""
         self.browser.set_window_size(w, h)
         self.browser.get(url)
 
@@ -83,9 +139,7 @@ class Predictor(BasePredictor):
 
     def predict(
         self,
-        latitude: float = Input(description="Latitude of the target location"),
-        longitude: float = Input(description="Longitude of the target location"),
-        address: str = Input(description="Optional address or label for the location", default=""),
+        address: str = Input(description="Address or 'lat,lon' of the target location"),
         w: int = Input(description="Viewport width", default=1920),
         h: int = Input(description="Viewport height", default=1080),
         wait_seconds: int = Input(description="Fixed time (seconds) to wait before taking screenshot", default=15),
@@ -97,17 +151,28 @@ class Predictor(BasePredictor):
         debug_urls: bool = Input(description="Print URL and step logs", default=True),
     ) -> List[Path]:
 
-        elev = get_elevation_open_elevation(latitude, longitude) if use_elevation else None
-        target_alt = elev if elev is not None else default_alt
+        # --- Geocode ---
+        lat, lon, label = geocode_address(address)
+        if debug_urls:
+            print(f"[Geocoding] {address!r} → ({lat:.6f}, {lon:.6f})  label={label}", flush=True)
 
+        # --- Altitude ---
+        elev = get_elevation_open_elevation(lat, lon) if use_elevation else None
+        target_alt = elev if elev is not None else default_alt
+        if debug_urls:
+            src = "Open-Elevation" if elev is not None else "default_alt"
+            print(f"[Altitude] Using {src}: {target_alt:.1f} m", flush=True)
+
+        # --- Camera params ---
         hero_tilt = 72.0
         hero_distance = near_distance_min
         hero_fov = 35.0
         hero_roll = 0.0
         hero_heading = start_heading_deg % 360.0
 
+        # --- Build URL ---
         hero_url = build_earth_url_with_search(
-            address, latitude, longitude,
+            label or address, lat, lon,
             a=target_alt,
             d=hero_distance,
             y=hero_fov,
@@ -121,11 +186,12 @@ class Predictor(BasePredictor):
             print(f"URL: {hero_url}", flush=True)
             print("======================================\n", flush=True)
 
+        # --- Capture ---
         full_img_path = self._open_and_capture_new_tab(
             hero_url, w, h, wait_until=wait_seconds, index=1, debug=debug_urls
         )
 
+        # --- Crop & return ---
         cropped_img_path = "final_view.png"
         center_crop(full_img_path, cropped_img_path, crop_margin)
-
         return [Path(cropped_img_path)]
