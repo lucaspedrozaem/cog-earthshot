@@ -1,4 +1,3 @@
-# predict.py
 from typing import List, Optional, Tuple, Dict
 from cog import BasePredictor, Input, Path
 
@@ -17,19 +16,11 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException
 
 # ---------- Free services ----------
-NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
+# NOMINATIM_URL has been removed as it's no longer used.
 OPEN_ELEVATION_URL = "https://api.open-elevation.com/api/v1/lookup"
 
 # ---------- Geocode / elevation ----------
-def geocode_nominatim(address: str, contact_email: str) -> Tuple[float, float]:
-    headers = {"User-Agent": f"earth-route-cog/1.0 ({contact_email or 'contact@example.com'})"}
-    params = {"q": address, "format": "jsonv2", "limit": 1, "addressdetails": 0}
-    r = requests.get(NOMINATIM_URL, headers=headers, params=params, timeout=20)
-    r.raise_for_status()
-    js = r.json()
-    if not js:
-        raise RuntimeError("Geocoding failed: no results from Nominatim.")
-    return float(js[0]["lat"]), float(js[0]["lon"])
+# geocode_nominatim function has been removed as it's no longer used.
 
 def get_elevation_open_elevation(lat: float, lon: float) -> Optional[float]:
     r = requests.get(OPEN_ELEVATION_URL, params={"locations": f"{lat},{lon}"}, timeout=20)
@@ -48,18 +39,20 @@ def clamp(v: float, lo: float, hi: float) -> float:
 
 def build_earth_url_with_search(address: str, lat: float, lon: float,
                                 a: float, d: float, y: float, h: float, t: float, r: float = 0.0) -> str:
-    addr = quote_plus(address)
+    # The address is now just a label for the URL search part.
+    addr = quote_plus(address) if address else ""
     return (f"https://earth.google.com/web/search/{addr}/"
             f"@{lat:.7f},{lon:.7f},{a:.1f}a,{d:.1f}d,{y:.2f}y,{h:.3f}h,{t:.3f}t,{r:.1f}r")
 
+# make_drone_route is no longer used but kept here in case you want to revert to multi-image mode.
 def make_drone_route(
     lat: float, lon: float, address: str,
     use_elevation: bool, default_alt: float,
     max_distance: float, near_distance_min: float,
     start_heading_deg: float, clockwise: bool,
-    contact_email: str, count: int = 10
+    count: int = 10
 ) -> List[Dict]:
-    elev = get_elevation_open_elevation(lat, lon) if use_elevation else None
+    elev = get_elevation_open_elevation(lat, lon)
     a_target = elev if elev is not None else default_alt
 
     N = max(3, count)
@@ -174,54 +167,56 @@ class Predictor(BasePredictor):
 
     def predict(
         self,
-        address: str = Input(description="Address or place name"),
+        latitude: float = Input(description="Latitude of the target location"),
+        longitude: float = Input(description="Longitude of the target location"),
+        address: str = Input(description="Optional address or label for the location", default=""),
         w: int = Input(description="Viewport width", default=1920),
         h: int = Input(description="Viewport height", default=1080),
         wait_seconds: int = Input(description="Extra wait after load", default=12),
         crop_margin: float = Input(description="Center-crop margin per side (0–0.49)", default=0.15),
-        count: int = Input(description="Number of views in route", default=10),
-        max_distance: float = Input(description="Max camera distance (≤195)", default=195.0),
-        near_distance_min: float = Input(description="Min near distance", default=90.0),
-        start_heading_deg: float = Input(description="Start heading (0=N,90=E,180=S,270=W)", default=0.0),
-        clockwise: bool = Input(description="Orbit clockwise?", default=True),
+        near_distance_min: float = Input(description="Camera distance for the shot", default=90.0),
+        start_heading_deg: float = Input(description="Camera heading (0=N,90=E,180=S,270=W)", default=0.0),
         use_elevation: bool = Input(description="Use Open-Elevation for target altitude", default=True),
         default_alt: float = Input(description="Fallback target altitude (m ASL)", default=30.0),
-        contact_email: str = Input(description="Contact email for Nominatim UA", default="you@example.com"),
-        debug_urls: bool = Input(description="Print URLs and step logs", default=True),
+        debug_urls: bool = Input(description="Print URL and step logs", default=True),
     ) -> List[Path]:
 
-        # 1) Geocode
-        lat, lon = geocode_nominatim(address, contact_email)
-        time.sleep(1.0)  # polite pause
+        # 1) Use latitude and longitude directly from inputs.
+        # Geocoding step has been removed.
 
-        # 2) Build ordered route
-        route = make_drone_route(
-            lat=lat, lon=lon, address=address,
-            use_elevation=use_elevation, default_alt=default_alt,
-            max_distance=max_distance, near_distance_min=near_distance_min,
-            start_heading_deg=start_heading_deg, clockwise=clockwise,
-            contact_email=contact_email, count=count
+        # 2) Define parameters for the single "best" hero shot
+        elev = get_elevation_open_elevation(latitude, longitude) if use_elevation else None
+        target_alt = elev if elev is not None else default_alt
+
+        # These parameters create a visually appealing, angled shot.
+        hero_tilt = 72.0
+        hero_distance = near_distance_min
+        hero_fov = 35.0
+        hero_roll = 0.0
+        hero_heading = start_heading_deg % 360.0
+
+        # 3) Build the single URL for our hero shot
+        hero_url = build_earth_url_with_search(
+            address, latitude, longitude,
+            a=target_alt,
+            d=hero_distance,
+            y=hero_fov,
+            h=hero_heading,
+            t=hero_tilt,
+            r=hero_roll
         )
 
-        # 3) Log all URLs
         if debug_urls:
-            print("\n=== Generated route URLs (ordered) ===", flush=True)
-            for step in route:
-                print(f"[{step['step']:02d}] {step['label']}: {step['url']}", flush=True)
-            print("=== End route URLs ===\n", flush=True)
-            try:
-                with open("urls.txt", "w", encoding="utf-8") as f:
-                    for step in route:
-                        f.write(f"{step['step']:02d}\t{step['label']}\t{step['url']}\n")
-            except Exception as e:
-                print(f"Failed to write urls.txt: {e}", flush=True)
+            print("\n=== Generating single hero shot URL ===", flush=True)
+            print(f"URL: {hero_url}", flush=True)
+            print("======================================\n", flush=True)
 
-        # 4) Capture each view in a FRESH TAB
-        outputs: List[Path] = []
-        for i, step in enumerate(route, start=1):
-            full_img = self._open_and_capture_new_tab(step["url"], w, h, wait_seconds, i, debug_urls)
-            cropped = f"view_{i:02d}.png"
-            center_crop(full_img, cropped, crop_margin)
-            outputs.append(Path(cropped))
-
-        return outputs
+        # 4) Capture the single view in a fresh tab
+        full_img_path = self._open_and_capture_new_tab(hero_url, w, h, wait_seconds, 1, debug_urls)
+        
+        # 5) Crop the image and prepare the output
+        cropped_img_path = "final_view.png"
+        center_crop(full_img_path, cropped_img_path, crop_margin)
+        
+        # Return a list containing the single output path
+        return [Path(cropped_img_path)]
