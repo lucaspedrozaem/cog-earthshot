@@ -46,62 +46,40 @@ def center_crop(image_path: str, output_path: str, crop_margin: float) -> None:
 # ---------- Predictor ----------
 class Predictor(BasePredictor):
     def setup(self) -> None:
+        """Load the model into memory to make running multiple predictions efficient"""
         options = webdriver.ChromeOptions()
         options.binary_location = '/root/chrome-linux/chrome'
         options.add_argument('--headless')
         options.add_argument('--no-sandbox')
-        options.add_argument('--disable-dev-shm-usage')
         self.browser = webdriver.Chrome(options=options)
-        self.wait = WebDriverWait(self.browser, 30)
 
-    def _wait_scene_ready(self, index: int, debug: bool) -> None:
-        try:
-            self.wait.until(EC.presence_of_element_located((By.TAG_NAME, "canvas")))
-            if debug: print(f"[Step {index:02d}] Canvas detected.", flush=True)
-        except TimeoutException:
-            if debug: print(f"[Step {index:02d}] No canvas before timeout.", flush=True)
-
-        try:
-            self.wait.until(lambda d: d.execute_script(
-                "return document.body && document.body.innerText.indexOf('Google Earth') === -1;"
-            ))
-            if debug: print(f"[Step {index:02d}] Splash gone.", flush=True)
-        except TimeoutException:
-            if debug: print(f"[Step {index:02d}] Splash still visible; continuing.", flush=True)
-
-    def _open_and_capture_new_tab(self, url: str, w: int, h: int, wait_seconds: int, index: int, debug: bool) -> str:
-        self.browser.switch_to.new_window('tab')
+    # Helper: open page + screenshot (matches your earlier behavior)
+    def _open_and_capture_new_tab(
+        self,
+        url: str,
+        w: int,
+        h: int,
+        wait_until: int,
+        index: int = 1,
+        debug: bool = True
+    ) -> str:
+        """Open the URL, optionally wait, and save a screenshot. Returns file path."""
         self.browser.set_window_size(w, h)
-        if debug: print(f"[Step {index:02d}] Opening NEW TAB: {url}", flush=True)
         self.browser.get(url)
 
-        try:
-            time.sleep(0.5)
-            self.browser.find_element(By.TAG_NAME, "body").send_keys(Keys.ESCAPE)
-        except Exception:
-            pass
+        if wait_until > 0:
+            for i in range(wait_until):
+                if debug:
+                    print(f"Elapsed time: {i+1}/{wait_until} seconds", flush=True)
+                time.sleep(1)
 
-        self._wait_scene_ready(index, debug)
-
-        # Reverted to a simple, fixed wait time.
-        if wait_seconds > 0:
-            if debug: print(f"[Step {index:02d}] Starting fixed wait: {wait_seconds}s", flush=True)
-            time.sleep(wait_seconds)
-            if debug: print(f"[Step {index:02d}] Fixed wait finished.", flush=True)
-
-        try:
-            self.browser.find_element(By.TAG_NAME, "body").send_keys(Keys.ARROW_UP)
-        except Exception:
-            pass
-
-        full_path = f"view_{index:02d}_full.png"
-        ok = self.browser.save_screenshot(full_path)
         if debug:
-            print(f"[Step {index:02d}] Screenshot saved: {full_path} (ok={ok})", flush=True)
+            print(f"Page title: {self.browser.title}", flush=True)
+            print(f"Page URL: {self.browser.current_url}", flush=True)
 
-        self.browser.close()
-        self.browser.switch_to.window(self.browser.window_handles[0])
-        return full_path
+        out_path = f"view_{index:02d}.png"
+        self.browser.save_screenshot(out_path)
+        return out_path
 
     def predict(
         self,
@@ -143,9 +121,11 @@ class Predictor(BasePredictor):
             print(f"URL: {hero_url}", flush=True)
             print("======================================\n", flush=True)
 
-        full_img_path = self._open_and_capture_new_tab(hero_url, w, h, wait_seconds, 1, debug_urls)
-        
+        full_img_path = self._open_and_capture_new_tab(
+            hero_url, w, h, wait_until=wait_seconds, index=1, debug=debug_urls
+        )
+
         cropped_img_path = "final_view.png"
         center_crop(full_img_path, cropped_img_path, crop_margin)
-        
+
         return [Path(cropped_img_path)]
