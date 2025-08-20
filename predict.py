@@ -9,10 +9,13 @@ from PIL import Image
 
 from selenium import webdriver
 
-# ---------- Free services ----------
+# ---------- Service URLs ----------
 OPEN_ELEVATION_URL = "https://api.open-elevation.com/api/v1/lookup"
 OPEN_METEO_GEOCODE_URL = "https://geocoding-api.open-meteo.com/v1/search"
 NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
+# New: Google Geocoding API URL
+GOOGLE_GEOCODE_URL = "https://maps.googleapis.com/maps/api/geocode/json"
+
 
 # ---------- Utils ----------
 def get_elevation_open_elevation(lat: float, lon: float) -> Optional[float]:
@@ -84,21 +87,51 @@ def geocode_nominatim(address: str) -> Optional[Tuple[float, float, str]]:
     label = hit.get("display_name", address)
     return lat, lon, label
 
-def geocode_address(address: str) -> Tuple[float, float, str]:
-    """Resolve address → (lat, lon, label). Tries Open-Meteo, then Nominatim."""
+# New: Google Geocoding function
+def geocode_google(address: str) -> Optional[Tuple[float, float, str]]:
+    """Final fallback geocoder using Google Maps API. Requires GOOGLE_API_KEY env var."""
+    api_key = os.getenv("GOOGLE_API_KEY")
+    if not address or not api_key:
+        return None
+        
+    params = {"address": address, "key": api_key}
+    r = requests.get(GOOGLE_GEOCODE_URL, params=params, timeout=20)
+    if not r.ok:
+        return None
+        
+    js = r.json()
+    if js.get("status") != "OK" or not js.get("results"):
+        return None
+        
+    hit = js["results"][0]
+    lat = float(hit["geometry"]["location"]["lat"])
+    lon = float(hit["geometry"]["location"]["lng"])
+    label = hit.get("formatted_address", address)
+    return lat, lon, label
+
+# Updated: geocode_address function
+def geocode_address(address: str) -> Tuple[Optional[float], Optional[float], str]:
+    """Resolve address → (lat, lon, label). Tries Open-Meteo, Nominatim, then Google."""
     # Accept "lat,lon" directly
     parsed = try_parse_latlon(address)
     if parsed:
         lat, lon = parsed
         return lat, lon, f"{lat:.6f}, {lon:.6f}"
 
+    # Try services in order
     res = geocode_open_meteo(address)
     if res:
         return res
     res = geocode_nominatim(address)
     if res:
         return res
-    raise ValueError(f"Could not geocode address: {address}")
+    res = geocode_google(address)
+    if res:
+        return res
+        
+    # If all fail, return None for coords
+    return None, None, address
+
 
 # ---------- Predictor ----------
 class Predictor(BasePredictor):
@@ -153,6 +186,15 @@ class Predictor(BasePredictor):
 
         # --- Geocode ---
         lat, lon, label = geocode_address(address)
+        
+        # Updated: Handle geocoding failure
+        if lat is None or lon is None:
+            fallback_url = f"https://earth.google.com/web/search/{quote_plus(address)}/"
+            raise ValueError(
+                f"Could not geocode address '{address}' with any service. "
+                f"You can try this fallback URL manually: {fallback_url}"
+            )
+            
         if debug_urls:
             print(f"[Geocoding] {address!r} → ({lat:.6f}, {lon:.6f})  label={label}", flush=True)
 
