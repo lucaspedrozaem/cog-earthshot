@@ -180,8 +180,8 @@ class Predictor(BasePredictor):
         use_elevation: bool = Input(description="Use Open-Elevation for target altitude", default=True),
         default_alt: float = Input(description="Fallback target altitude (m ASL)", default=30.0),
         # New: google_api_key parameter
-        google_api_key: Optional[str] = Input(
-            description="Google Geocoding API Key. If not provided, will check for GOOGLE_API_KEY environment variable.",
+        google_api_key: str = Input(
+            description="API",
             default=None
         ),
         debug_urls: bool = Input(description="Print URL and step logs", default=True),
