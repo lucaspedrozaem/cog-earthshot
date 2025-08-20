@@ -13,7 +13,6 @@ from selenium import webdriver
 OPEN_ELEVATION_URL = "https://api.open-elevation.com/api/v1/lookup"
 OPEN_METEO_GEOCODE_URL = "https://geocoding-api.open-meteo.com/v1/search"
 NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
-# New: Google Geocoding API URL
 GOOGLE_GEOCODE_URL = "https://maps.googleapis.com/maps/api/geocode/json"
 
 
@@ -87,10 +86,9 @@ def geocode_nominatim(address: str) -> Optional[Tuple[float, float, str]]:
     label = hit.get("display_name", address)
     return lat, lon, label
 
-# New: Google Geocoding function
-def geocode_google(address: str) -> Optional[Tuple[float, float, str]]:
-    """Final fallback geocoder using Google Maps API. Requires GOOGLE_API_KEY env var."""
-    api_key = os.getenv("GOOGLE_API_KEY")
+# Updated: Accepts an api_key parameter
+def geocode_google(address: str, api_key: Optional[str]) -> Optional[Tuple[float, float, str]]:
+    """Final fallback geocoder using Google Maps API."""
     if not address or not api_key:
         return None
         
@@ -109,8 +107,8 @@ def geocode_google(address: str) -> Optional[Tuple[float, float, str]]:
     label = hit.get("formatted_address", address)
     return lat, lon, label
 
-# Updated: geocode_address function
-def geocode_address(address: str) -> Tuple[Optional[float], Optional[float], str]:
+# Updated: Accepts and passes along the api_key
+def geocode_address(address: str, api_key: Optional[str]) -> Tuple[Optional[float], Optional[float], str]:
     """Resolve address → (lat, lon, label). Tries Open-Meteo, Nominatim, then Google."""
     # Accept "lat,lon" directly
     parsed = try_parse_latlon(address)
@@ -125,7 +123,7 @@ def geocode_address(address: str) -> Tuple[Optional[float], Optional[float], str
     res = geocode_nominatim(address)
     if res:
         return res
-    res = geocode_google(address)
+    res = geocode_google(address, api_key)
     if res:
         return res
         
@@ -181,52 +179,62 @@ class Predictor(BasePredictor):
         start_heading_deg: float = Input(description="Camera heading (0=N,90=E,180=S,270=W)", default=0.0),
         use_elevation: bool = Input(description="Use Open-Elevation for target altitude", default=True),
         default_alt: float = Input(description="Fallback target altitude (m ASL)", default=30.0),
+        # New: google_api_key parameter
+        google_api_key: Optional[str] = Input(
+            description="Google Geocoding API Key. If not provided, will check for GOOGLE_API_KEY environment variable.",
+            default=None
+        ),
         debug_urls: bool = Input(description="Print URL and step logs", default=True),
     ) -> List[Path]:
 
         # --- Geocode ---
-        lat, lon, label = geocode_address(address)
+        # Prioritize provided key, but fall back to environment variable
+        key_to_use = google_api_key or os.getenv("GOOGLE_API_KEY")
+        lat, lon, label = geocode_address(address, key_to_use)
         
-        # Updated: Handle geocoding failure
-        if lat is None or lon is None:
-            fallback_url = f"https://earth.google.com/web/search/{quote_plus(address)}/"
-            raise ValueError(
-                f"Could not geocode address '{address}' with any service. "
-                f"You can try this fallback URL manually: {fallback_url}"
-            )
-            
-        if debug_urls:
-            print(f"[Geocoding] {address!r} → ({lat:.6f}, {lon:.6f})  label={label}", flush=True)
-
-        # --- Altitude ---
-        elev = get_elevation_open_elevation(lat, lon) if use_elevation else None
-        target_alt = elev if elev is not None else default_alt
-        if debug_urls:
-            src = "Open-Elevation" if elev is not None else "default_alt"
-            print(f"[Altitude] Using {src}: {target_alt:.1f} m", flush=True)
-
-        # --- Camera params ---
-        hero_tilt = 72.0
-        hero_distance = near_distance_min
-        hero_fov = 35.0
-        hero_roll = 0.0
-        hero_heading = start_heading_deg % 360.0
-
         # --- Build URL ---
-        hero_url = build_earth_url_with_search(
-            label or address, lat, lon,
-            a=target_alt,
-            d=hero_distance,
-            y=hero_fov,
-            h=hero_heading,
-            t=hero_tilt,
-            r=hero_roll
-        )
+        # Updated: Handle geocoding failure by building a simpler URL
+        if lat is None or lon is None:
+            # If geocoding fails, build a URL that only contains the search query
+            hero_url = f"https://earth.google.com/web/search/{quote_plus(address)}/"
+            if debug_urls:
+                print(f"[Geocoding] All services failed for '{address}'. Using fallback search URL.", flush=True)
+                print("\n=== Generating fallback search URL ===", flush=True)
+                print(f"URL: {hero_url}", flush=True)
+                print("==================================\n", flush=True)
+        else:
+            # If geocoding succeeds, build the full, detailed URL
+            if debug_urls:
+                print(f"[Geocoding] {address!r} → ({lat:.6f}, {lon:.6f})  label={label}", flush=True)
 
-        if debug_urls:
-            print("\n=== Generating single hero shot URL ===", flush=True)
-            print(f"URL: {hero_url}", flush=True)
-            print("======================================\n", flush=True)
+            # --- Altitude ---
+            elev = get_elevation_open_elevation(lat, lon) if use_elevation else None
+            target_alt = elev if elev is not None else default_alt
+            if debug_urls:
+                src = "Open-Elevation" if elev is not None else "default_alt"
+                print(f"[Altitude] Using {src}: {target_alt:.1f} m", flush=True)
+
+            # --- Camera params ---
+            hero_tilt = 72.0
+            hero_distance = near_distance_min
+            hero_fov = 35.0
+            hero_roll = 0.0
+            hero_heading = start_heading_deg % 360.0
+
+            hero_url = build_earth_url_with_search(
+                label or address, lat, lon,
+                a=target_alt,
+                d=hero_distance,
+                y=hero_fov,
+                h=hero_heading,
+                t=hero_tilt,
+                r=hero_roll
+            )
+
+            if debug_urls:
+                print("\n=== Generating single hero shot URL ===", flush=True)
+                print(f"URL: {hero_url}", flush=True)
+                print("======================================\n", flush=True)
 
         # --- Capture ---
         full_img_path = self._open_and_capture_new_tab(
