@@ -147,7 +147,6 @@ class Predictor(BasePredictor):
         self.browser = webdriver.Chrome(options=options)
 
     # open page + screenshot helper
-    
     def _open_and_capture_new_tab(
         self,
         url: str,
@@ -160,24 +159,23 @@ class Predictor(BasePredictor):
         self.browser.set_window_size(w, h)
         self.browser.get(url)
 
+        # 1. Wait for the page to load (User defined wait time)
         if wait_until > 0:
             for i in range(wait_until):
                 if debug:
                     print(f"Elapsed time: {i+1}/{wait_until} seconds", flush=True)
-                
-                # --- NEW: POP-UP KILLER ---
-                # Every 2 seconds (starting after the 2nd second), try to press ESCAPE.
-                # This closes the "New from Google Earth" modal if it is open.
-                if i > 1 and i % 2 == 0:
-                    try:
-                        ActionChains(self.browser).send_keys(Keys.ESCAPE).perform()
-                        if debug:
-                            print("Sent ESCAPE key to dismiss potential popups.", flush=True)
-                    except Exception as e:
-                        pass # Ignore errors if browser isn't ready
-                # --------------------------
-
                 time.sleep(1)
+
+        # 2. Dismiss Pop-ups (Once at the end)
+        try:
+            if debug:
+                print("Sending ESCAPE key to dismiss popups...", flush=True)
+            ActionChains(self.browser).send_keys(Keys.ESCAPE).perform()
+            # Critical: Wait a moment for the modal fade-out animation to finish
+            time.sleep(0.5) 
+        except Exception as e:
+            if debug:
+                print(f"Could not send ESCAPE key: {e}", flush=True)
 
         if debug:
             print(f"Page title: {self.browser.title}", flush=True)
