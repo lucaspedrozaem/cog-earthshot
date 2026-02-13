@@ -9,6 +9,11 @@ from PIL import Image
 
 from selenium import webdriver
 
+from selenium.webdriver.common.action_chains import ActionChains
+from selenium.webdriver.common.keys import Keys
+
+
+
 # ---------- Service URLs ----------
 OPEN_ELEVATION_URL = "https://api.open-elevation.com/api/v1/lookup"
 OPEN_METEO_GEOCODE_URL = "https://geocoding-api.open-meteo.com/v1/search"
@@ -142,6 +147,7 @@ class Predictor(BasePredictor):
         self.browser = webdriver.Chrome(options=options)
 
     # open page + screenshot helper
+    
     def _open_and_capture_new_tab(
         self,
         url: str,
@@ -158,6 +164,19 @@ class Predictor(BasePredictor):
             for i in range(wait_until):
                 if debug:
                     print(f"Elapsed time: {i+1}/{wait_until} seconds", flush=True)
+                
+                # --- NEW: POP-UP KILLER ---
+                # Every 2 seconds (starting after the 2nd second), try to press ESCAPE.
+                # This closes the "New from Google Earth" modal if it is open.
+                if i > 1 and i % 2 == 0:
+                    try:
+                        ActionChains(self.browser).send_keys(Keys.ESCAPE).perform()
+                        if debug:
+                            print("Sent ESCAPE key to dismiss potential popups.", flush=True)
+                    except Exception as e:
+                        pass # Ignore errors if browser isn't ready
+                # --------------------------
+
                 time.sleep(1)
 
         if debug:
@@ -167,6 +186,8 @@ class Predictor(BasePredictor):
         out_path = f"view_{index:02d}.png"
         self.browser.save_screenshot(out_path)
         return out_path
+
+
 
     def predict(
         self,
