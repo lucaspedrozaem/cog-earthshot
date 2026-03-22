@@ -16,6 +16,7 @@ from selenium.webdriver.common.keys import Keys
 
 # ---------- Service URLs ----------
 OPEN_ELEVATION_URL = "https://api.open-elevation.com/api/v1/lookup"
+OPEN_METEO_ELEVATION_URL = "https://api.open-meteo.com/v1/elevation"
 OPEN_METEO_GEOCODE_URL = "https://geocoding-api.open-meteo.com/v1/search"
 NOMINATIM_URL = "https://nominatim.openstreetmap.org/search"
 GOOGLE_GEOCODE_URL = "https://maps.googleapis.com/maps/api/geocode/json"
@@ -23,12 +24,24 @@ GOOGLE_GEOCODE_URL = "https://maps.googleapis.com/maps/api/geocode/json"
 
 # ---------- Utils ----------
 def get_elevation_open_elevation(lat: float, lon: float) -> Optional[float]:
-    r = requests.get(OPEN_ELEVATION_URL, params={"locations": f"{lat},{lon}"}, timeout=20)
-    if not r.ok:
-        return None
-    js = r.json()
-    res = js.get("results") or []
-    return float(res[0].get("elevation")) if res else None
+    try:
+        r = requests.get(OPEN_ELEVATION_URL, params={"locations": f"{lat},{lon}"}, timeout=20)
+        if r.ok:
+            res = r.json().get("results") or []
+            if res:
+                return float(res[0].get("elevation"))
+    except Exception:
+        pass
+    # Fallback: Open-Meteo elevation API
+    try:
+        r = requests.get(OPEN_METEO_ELEVATION_URL, params={"latitude": lat, "longitude": lon}, timeout=20)
+        if r.ok:
+            elevations = r.json().get("elevation") or []
+            if elevations:
+                return float(elevations[0])
+    except Exception:
+        pass
+    return None
 
 def build_earth_url_with_search(address: str, lat: float, lon: float,
                                 a: float, d: float, y: float, h: float, t: float, r: float = 0.0) -> str:
