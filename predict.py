@@ -163,6 +163,26 @@ POPUP_CHECK_POINTS = [(-230, -255), (230, -255), (-230, 255), (230, 255), (-230,
 POPUP_CLOSE_OFFSET = (204, -240)
 
 
+# A second card, "Ask Google Earth for help" (Gemini), seen 2026-11-06 under a
+# toolbar button: light (240, 244, 249) body, about 310x250 px, at a fixed
+# place in a 1920 px wide window; its "Dismiss" button sits at (815, 403).
+GEMINI_CARD_POINTS = [(700, 300), (970, 300), (700, 430), (970, 430)]
+GEMINI_CARD_DISMISS = (815, 403)
+GEMINI_CARD_RGB = (240, 244, 249)
+
+
+def gemini_card_visible(png: bytes) -> bool:
+    with Image.open(io.BytesIO(png)) as im:
+        rgb = im.convert("RGB")
+        w, h = rgb.size
+        for x, y in GEMINI_CARD_POINTS:
+            if not (0 <= x < w and 0 <= y < h):
+                return False
+            if any(abs(c - e) > 6 for c, e in zip(rgb.getpixel((x, y)), GEMINI_CARD_RGB)):
+                return False
+        return True
+
+
 def popup_visible(png: bytes) -> bool:
     with Image.open(io.BytesIO(png)) as im:
         rgb = im.convert("RGB")
@@ -242,9 +262,21 @@ class Predictor(BasePredictor):
         self.browser.save_screenshot(out_path)
         return out_path
 
+    def _click(self, x: int, y: int) -> None:
+        actions = ActionBuilder(self.browser)
+        actions.pointer_action.move_to_location(x, y)
+        actions.pointer_action.click()
+        actions.perform()
+
     def _close_earth_popup(self, debug: bool = True) -> None:
         try:
             png = self.browser.get_screenshot_as_png()
+            if gemini_card_visible(png):
+                if debug:
+                    print("'Ask Google Earth for help' card on screen: clicking Dismiss.", flush=True)
+                self._click(*GEMINI_CARD_DISMISS)
+                time.sleep(1.0)
+                png = self.browser.get_screenshot_as_png()
             if not popup_visible(png):
                 if debug:
                     print("No Google Earth pop-up on screen.", flush=True)
@@ -254,10 +286,7 @@ class Predictor(BasePredictor):
             x, y = w // 2 + POPUP_CLOSE_OFFSET[0], h // 2 + POPUP_CLOSE_OFFSET[1]
             if debug:
                 print(f"Google Earth pop-up on screen: clicking its close button at ({x}, {y}).", flush=True)
-            actions = ActionBuilder(self.browser)
-            actions.pointer_action.move_to_location(x, y)
-            actions.pointer_action.click()
-            actions.perform()
+            self._click(x, y)
             time.sleep(1.0)
             if debug:
                 still = popup_visible(self.browser.get_screenshot_as_png())
