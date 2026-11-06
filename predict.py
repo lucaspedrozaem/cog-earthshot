@@ -1,6 +1,7 @@
 from typing import List, Optional, Tuple
 from cog import BasePredictor, Input, Path
 
+import io
 import os
 import time
 import requests
@@ -10,6 +11,7 @@ from PIL import Image
 from selenium import webdriver
 
 from selenium.webdriver.common.action_chains import ActionChains
+from selenium.webdriver.common.actions.action_builder import ActionBuilder
 from selenium.webdriver.common.keys import Keys
 
 
@@ -149,6 +151,33 @@ def geocode_address(address: str, api_key: Optional[str]) -> Tuple[Optional[floa
     return None, None, address
 
 
+# ---------- Google Earth pop-up ----------
+# Since about 2026-11-04 Google Earth Web opens a centred "New from Google
+# Earth" card on a fresh session that ESCAPE does not close, and captures
+# photographed it (5 of 39 VideoTour aerials). The card is white, 496x550 CSS
+# px, centred in the window; its close button sits 204 px right of and 240 px
+# above the window centre. Clicking blindly would hit the map on a warm session
+# (the card shows once per browser), so the click only happens when the card's
+# white padding is on screen at all six check points.
+POPUP_CHECK_POINTS = [(-230, -255), (230, -255), (-230, 255), (230, 255), (-230, 0), (230, 0)]
+POPUP_CLOSE_OFFSET = (204, -240)
+
+
+def popup_visible(png: bytes) -> bool:
+    with Image.open(io.BytesIO(png)) as im:
+        rgb = im.convert("RGB")
+        w, h = rgb.size
+        cx, cy = w // 2, h // 2
+        for dx, dy in POPUP_CHECK_POINTS:
+            x, y = cx + dx, cy + dy
+            if not (0 <= x < w and 0 <= y < h):
+                return False
+            r, g, b = rgb.getpixel((x, y))
+            if r <= 245 or g <= 245 or b <= 245:
+                return False
+        return True
+
+
 # ---------- Predictor ----------
 class Predictor(BasePredictor):
     def setup(self) -> None:
@@ -167,7 +196,8 @@ class Predictor(BasePredictor):
         h: int,
         wait_until: int,
         index: int = 1,
-        debug: bool = True
+        debug: bool = True,
+        close_popup: bool = True
     ) -> str:
         self.browser.set_window_size(w, h)
         self.browser.get(url)
@@ -190,6 +220,10 @@ class Predictor(BasePredictor):
             if debug:
                 print(f"Could not send ESCAPE key: {e}", flush=True)
 
+        # 3. Close Google Earth's "New from Google Earth" card when it is there.
+        if close_popup:
+            self._close_earth_popup(debug)
+
         if debug:
             print(f"Page title: {self.browser.title}", flush=True)
             print(f"Page URL: {self.browser.current_url}", flush=True)
@@ -197,6 +231,30 @@ class Predictor(BasePredictor):
         out_path = f"view_{index:02d}.png"
         self.browser.save_screenshot(out_path)
         return out_path
+
+    def _close_earth_popup(self, debug: bool = True) -> None:
+        try:
+            png = self.browser.get_screenshot_as_png()
+            if not popup_visible(png):
+                if debug:
+                    print("No Google Earth pop-up on screen.", flush=True)
+                return
+            with Image.open(io.BytesIO(png)) as im:
+                w, h = im.size
+            x, y = w // 2 + POPUP_CLOSE_OFFSET[0], h // 2 + POPUP_CLOSE_OFFSET[1]
+            if debug:
+                print(f"Google Earth pop-up on screen: clicking its close button at ({x}, {y}).", flush=True)
+            actions = ActionBuilder(self.browser)
+            actions.pointer_action.move_to_location(x, y)
+            actions.pointer_action.click()
+            actions.perform()
+            time.sleep(1.0)
+            if debug:
+                still = popup_visible(self.browser.get_screenshot_as_png())
+                print(f"Pop-up still visible after the click: {still}", flush=True)
+        except Exception as e:
+            if debug:
+                print(f"Could not close the Google Earth pop-up: {e}", flush=True)
 
 
 
@@ -211,6 +269,9 @@ class Predictor(BasePredictor):
         start_heading_deg: float = Input(description="Camera heading (0=N,90=E,180=S,270=W)", default=0.0),
         use_elevation: bool = Input(description="Use Open-Elevation for target altitude", default=True),
         default_alt: float = Input(description="Fallback target altitude (m ASL)", default=30.0),
+        tilt_deg: float = Input(description="Camera tilt: 0 looks straight down, 90 at the horizon", default=72.0, ge=0.0, le=89.0),
+        fov_deg: float = Input(description="Camera vertical field of view (degrees)", default=35.0, ge=10.0, le=90.0),
+        close_popup: bool = Input(description="Close Google Earth's 'New from Google Earth' card when it is on screen", default=True),
         # New: google_api_key parameter
         google_api_key: str = Input(
             description="API",
@@ -247,9 +308,9 @@ class Predictor(BasePredictor):
                 print(f"[Altitude] Using {src}: {target_alt:.1f} m", flush=True)
 
             # --- Camera params ---
-            hero_tilt = 72.0
+            hero_tilt = float(tilt_deg)
             hero_distance = near_distance_min
-            hero_fov = 35.0
+            hero_fov = float(fov_deg)
             hero_roll = 0.0
             hero_heading = start_heading_deg % 360.0
 
@@ -270,7 +331,7 @@ class Predictor(BasePredictor):
 
         # --- Capture ---
         full_img_path = self._open_and_capture_new_tab(
-            hero_url, w, h, wait_until=wait_seconds, index=1, debug=debug_urls
+            hero_url, w, h, wait_until=wait_seconds, index=1, debug=debug_urls, close_popup=close_popup
         )
 
         # --- Crop & return ---
