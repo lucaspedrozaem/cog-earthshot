@@ -186,6 +186,16 @@ class Predictor(BasePredictor):
         options.binary_location = '/root/chrome-linux/chrome'
         options.add_argument('--headless')
         options.add_argument('--no-sandbox')
+        # Google Earth is WebGL. The build downloads the latest Chromium
+        # snapshot, and since Chrome 137 a GPU-less headless browser no longer
+        # falls back to software WebGL on its own: the 2026-11-06 build showed
+        # only Earth's splash screen (empty page title) on every capture.
+        # SwiftShader must be asked for explicitly.
+        options.add_argument('--enable-unsafe-swiftshader')
+        options.add_argument('--use-gl=angle')
+        options.add_argument('--use-angle=swiftshader')
+        options.add_argument('--ignore-gpu-blocklist')
+        options.add_argument('--enable-webgl')
         self.browser = webdriver.Chrome(options=options)
 
     # open page + screenshot helper
